@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Flappy Kiro</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background-color: #0d0d0d;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas" width="480" height="640">
+    Your browser does not support HTML5 Canvas. Please upgrade to a modern browser.
+  </canvas>
+  <script>
+    // 1. Constants
+    const CANVAS_W = 480, CANVAS_H = 640, GROUND_H = 20;
+
+    // Physics
+    const GRAVITY = 0.5, JUMP_VY = -8, VY_MIN = -8, VY_MAX = 12;
+
+    // Wall
+    const SPAWN_INTERVAL = 90, WALL_WIDTH = 50, GAP_HEIGHT = 150, SCROLL_SPEED = 3, GAP_MIN_TOP = 60, GAP_MAX_TOP = 430;
+
+    // Colors
+    const BG_COLOR = '#1a0a2e', WALL_COLOR = '#4a0e6e', GROUND_COLOR = '#2d1b00', TEXT_COLOR = '#ffffff';
+
+    // 2. GameState
+    const GameState = {
+      state: 'start',
+      tick: 0,
+      score: 0,
+      walls: [],
+      ghosty: {
+        x: 80, y: 260, vy: 0,
+        width: 40, height: 40,
+        spriteLoaded: false, spriteEl: null
+      }
+    };
+
+    // 3. Audio_Manager
+    const Audio_Manager = {
+      sounds: {},
+      init() {
+        ['jump', 'game_over'].forEach(name => {
+          const src = name === 'jump' ? 'assets/jump.wav' : 'assets/game_over.wav';
+          const audio = new Audio(src);
+          audio.onerror = () => {
+            console.error(`Audio_Manager: failed to load ${src}`);
+            this.sounds[name] = null;
+          };
+          this.sounds[name] = audio;
+        });
+      },
+      play(name) {
+        const snd = this.sounds[name];
+        if (!snd) return;
+        snd.currentTime = 0;
+        snd.play().catch(() => {});
+      }
+    };
+
+    // 4. Physics_Engine
+    const Physics_Engine = {
+      tick(state) {
+        const g = state.ghosty;
+        g.vy += GRAVITY;
+        if (g.vy < VY_MIN) g.vy = VY_MIN;
+        if (g.vy > VY_MAX) g.vy = VY_MAX;
+        g.y += g.vy;
+      },
+      applyJump(state) {
+        state.ghosty.vy = JUMP_VY;
+      },
+      reset(state) {
+        state.ghosty.y = 260;
+        state.ghosty.vy = 0;
+      }
+    };
+
+    // 5. Wall_Spawner
+    const Wall_Spawner = {
+      tick(state) {
+        state.tick++;
+        if (state.tick === 1 || (state.tick - 1) % SPAWN_INTERVAL === 0) {
+          this.spawnWall(state);
+        }
+        for (const wall of state.walls) {
+          wall.x -= SCROLL_SPEED;
+        }
+        state.walls = state.walls.filter(w => w.x + w.wallWidth >= 0);
+      },
+      spawnWall(state) {
+        const range = GAP_MAX_TOP - GAP_MIN_TOP;
+        const gapTop = GAP_MIN_TOP + Math.floor(Math.random() * (range + 1));
+        state.walls.push({
+          x: CANVAS_W,
+          gapTop,
+          gapHeight: GAP_HEIGHT,
+          wallWidth: WALL_WIDTH,
+          scored: false
+        });
+      },
+      reset(state) {
+        state.walls = [];
+        state.tick = 0;
+      }
+    };
+
+    // 6. Collision_Detector
+    const Collision_Detector = {
+      _aabb(a, b) {
+        return a.x < b.x + b.w &&
+               a.x + a.w > b.x &&
+               a.y < b.y + b.h &&
+               a.y + a.h > b.y;
+      },
+      _ghostyRect(ghosty) {
+        return { x: ghosty.x + 2, y: ghosty.y + 2, w: ghosty.width - 4, h: ghosty.height - 4 };
+      },
+      check(state) {
+        const gr = this._ghostyRect(state.ghosty);
+        // Ground check
+        if (state.ghosty.y + state.ghosty.height - 2 >= CANVAS_H - GROUND_H) {
+          state.state = 'gameover';
+          Audio_Manager.play('game_over');
+          return true;
+        }
+        // Wall AABB check
+        for (const wall of state.walls) {
+          const topWall    = { x: wall.x, y: 0,                          w: wall.wallWidth, h: wall.gapTop };
+          const bottomWall = { x: wall.x, y: wall.gapTop + wall.gapHeight, w: wall.wallWidth, h: CANVAS_H - (wall.gapTop + wall.gapHeight) - GROUND_H };
+          if (this._aabb(gr, topWall) || this._aabb(gr, bottomWall)) {
+            state.state = 'gameover';
+            Audio_Manager.play('game_over');
+            return true;
+          }
+        }
+        return false;
+      }
+    };
+
+    // 7. Score_Tracker
+    const Score_Tracker = {
+      check(state) {
+        const g = state.ghosty;
+        for (const wall of state.walls) {
+          if (!wall.scored && (g.x + g.width) > (wall.x + wall.wallWidth)) {
+            state.score++;
+            wall.scored = true;
+          }
+        }
+      },
+      reset(state) {
+        state.score = 0;
+      }
+    };
+
+    // 8. Renderer
+    const Renderer = {
+      canvas: null,
+      ctx: null,
+      init(canvasEl) {
+        this.canvas = canvasEl;
+        this.ctx = canvasEl.getContext('2d');
+      },
+      draw(state) {
+        this._drawBackground();
+        this._drawWalls(state.walls);
+        this._drawGround();
+        if (state.state === 'start') {
+          this._drawGhosty(state.ghosty);
+          this._drawStartScreen();
+        } else if (state.state === 'playing') {
+          this._drawGhosty(state.ghosty);
+          this._drawScore(state.score);
+        } else if (state.state === 'gameover') {
+          this._drawGhosty(state.ghosty);
+          this._drawGameOverScreen(state.score);
+        }
+      },
+      _drawBackground() {
+        this.ctx.fillStyle = BG_COLOR;
+        this.ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+      },
+      _drawGround() {
+        this.ctx.fillStyle = GROUND_COLOR;
+        this.ctx.fillRect(0, CANVAS_H - GROUND_H, CANVAS_W, GROUND_H);
+      },
+      _drawWalls(walls) {
+        this.ctx.fillStyle = WALL_COLOR;
+        for (const wall of walls) {
+          // Top wall
+          this.ctx.fillRect(wall.x, 0, wall.wallWidth, wall.gapTop);
+          // Bottom wall
+          const bottomY = wall.gapTop + wall.gapHeight;
+          this.ctx.fillRect(wall.x, bottomY, wall.wallWidth, CANVAS_H - bottomY - GROUND_H);
+        }
+      },
+      _drawGhosty(ghosty) {
+        if (ghosty.spriteLoaded && ghosty.spriteEl) {
+          this.ctx.drawImage(ghosty.spriteEl, ghosty.x, ghosty.y, ghosty.width, ghosty.height);
+        } else {
+          // Placeholder: white rectangle
+          this.ctx.fillStyle = '#cccccc';
+          this.ctx.fillRect(ghosty.x, ghosty.y, ghosty.width, ghosty.height);
+        }
+      },
+      _drawScore(score) {
+        this.ctx.fillStyle = TEXT_COLOR;
+        this.ctx.font = 'bold 32px Arial';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText(String(score), CANVAS_W / 2, CANVAS_H * 0.12);
+      },
+      _drawStartScreen() {
+        this.ctx.fillStyle = TEXT_COLOR;
+        this.ctx.font = 'bold 40px Arial';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('Flappy Kiro', CANVAS_W / 2, CANVAS_H * 0.25);
+        this.ctx.font = '20px Arial';
+        this.ctx.fillText('Press SPACE or Click to Start', CANVAS_W / 2, CANVAS_H * 0.75);
+      },
+      _drawGameOverScreen(score) {
+        // Semi-transparent overlay
+        this.ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        this.ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+        this.ctx.fillStyle = TEXT_COLOR;
+        this.ctx.font = 'bold 48px Arial';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('Game Over', CANVAS_W / 2, CANVAS_H * 0.4);
+        this.ctx.font = 'bold 32px Arial';
+        this.ctx.fillText('Score: ' + score, CANVAS_W / 2, CANVAS_H * 0.52);
+        this.ctx.font = '20px Arial';
+        this.ctx.fillText('Press SPACE or Click to Restart', CANVAS_W / 2, CANVAS_H * 0.65);
+      }
+    };
+
+    // 9. Game_Loop
+    const Game_Loop = {
+      _rafId: null,
+      start() {
+        this._rafId = requestAnimationFrame(this._tick.bind(this));
+      },
+      stop() {
+        if (this._rafId !== null) {
+          cancelAnimationFrame(this._rafId);
+          this._rafId = null;
+        }
+      },
+      reset() {
+        this.stop();
+        Physics_Engine.reset(GameState);
+        Wall_Spawner.reset(GameState);
+        Score_Tracker.reset(GameState);
+        GameState.state = 'start';
+      },
+      _tick() {
+        if (GameState.state === 'playing') {
+          Physics_Engine.tick(GameState);
+          Wall_Spawner.tick(GameState);
+          const hit = Collision_Detector.check(GameState);
+          if (!hit) {
+            Score_Tracker.check(GameState);
+          }
+        }
+        Renderer.draw(GameState);
+        this._rafId = requestAnimationFrame(this._tick.bind(this));
+      }
+    };
+
+    // 10. Input handlers
+    function handleInput() {
+      if (GameState.state === 'start') {
+        GameState.state = 'playing';
+      } else if (GameState.state === 'playing') {
+        Physics_Engine.applyJump(GameState);
+        Audio_Manager.play('jump');
+      } else if (GameState.state === 'gameover') {
+        Game_Loop.reset();
+        Game_Loop.start();
+      }
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        handleInput();
+      }
+    });
+
+    document.getElementById('gameCanvas').addEventListener('click', () => {
+      handleInput();
+    });
+
+    // 11. Boot
+    // Preload Ghosty sprite
+    GameState.ghosty.spriteEl = new Image();
+    GameState.ghosty.spriteEl.onload  = () => { GameState.ghosty.spriteLoaded = true; };
+    GameState.ghosty.spriteEl.onerror = () => { GameState.ghosty.spriteLoaded = false; };
+    GameState.ghosty.spriteEl.src = 'assets/ghosty.png';
+
+    // Initialize subsystems and start the loop
+    Audio_Manager.init();
+    Renderer.init(document.getElementById('gameCanvas'));
+    Game_Loop.start();
+  </script>
+</body>
+</html>
